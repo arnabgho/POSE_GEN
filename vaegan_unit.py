@@ -15,9 +15,10 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 import visdom
 from torch.autograd import Variable
-
+from common_net import *
+from torchvision.utils import save_image
 vis = visdom.Visdom()
-vis.env = 'vae_dcgan'
+vis.env = 'vaegan_unit'
 
 
 parser = argparse.ArgumentParser()
@@ -26,7 +27,7 @@ parser.add_argument('--dataroot', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
 parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
-parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
+parser.add_argument('--nz', type=int, default=512, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
@@ -122,6 +123,7 @@ class _Sampler(nn.Module):
         eps = Variable(eps)
         return eps.mul(std).add_(mu)
 
+fch=0
 
 class _Encoder(nn.Module):
     def __init__(self,imageSize):
@@ -133,25 +135,51 @@ class _Encoder(nn.Module):
         assert n>=3,'imageSize must be at least 8'
         n=int(n)
 
+        input_dim_a = 3
+        ch = 64
+        n_enc_front_blk  = 3
+        n_enc_latter_blk = 2
+        n_enc_res_blk    = 3
+        n_enc_shared_blk = 1
+        encA=[]
+        encA += [LeakyReLUConv2d(input_dim_a, ch, kernel_size=7, stride=2, padding=1)]
+        tch=ch
+        for i in range(0,n_enc_front_blk):
+            encA += [ReLUINSConv2d(tch, tch * 2, kernel_size=3, stride=2, padding=1)]
+            tch *= 2
+        for i in range(0,n_enc_latter_blk):
+            encA += [ReLUINSConv2d(tch, tch , kernel_size=3, stride=2, padding=1)]
 
-        self.conv1 = nn.Conv2d(ngf * 2**(n-3), nz, 4)
-        self.conv2 = nn.Conv2d(ngf * 2**(n-3), nz, 4)
+        fch=tch
+        for i in range(0, n_enc_res_blk):
+            encA += [INSResBlock(tch, tch)]
 
-        self.encoder = nn.Sequential()
-        # input is (nc) x 64 x 64
-        self.encoder.add_module('input-conv',nn.Conv2d(nc, ngf, 4, 2, 1, bias=False))
-        self.encoder.add_module('input-relu',nn.LeakyReLU(0.2, inplace=True))
-        for i in range(n-3):
-            # state size. (ngf) x 32 x 32
-            self.encoder.add_module('pyramid.{0}-{1}.conv'.format(ngf*2**i, ngf * 2**(i+1)), nn.Conv2d(ngf*2**(i), ngf * 2**(i+1), 4, 2, 1, bias=False))
-            self.encoder.add_module('pyramid.{0}.batchnorm'.format(ngf * 2**(i+1)), nn.BatchNorm2d(ngf * 2**(i+1)))
-            self.encoder.add_module('pyramid.{0}.relu'.format(ngf * 2**(i+1)), nn.LeakyReLU(0.2, inplace=True))
+        for i in range(0, n_enc_shared_blk):
+            encA += [INSResBlock(tch, tch)]
+
+        #encA += [GaussianNoiseLayer()]
+        self.encoder=nn.Sequential(*encA)
+        self.fc21 = nn.Linear(fch,nz)  #nn.Conv2d(fch, nz, 4, 1, 0, bias=False)  #  nn.Linear(nz, nz)
+        self.fc22 = nn.Linear(fch,nz)  #nn.Conv2d(fch, nz, 4, 1, 0, bias=False)   # nn.Linear(nz, nz)
+
+        #self.conv1 = nn.Conv2d(ngf * 2**(n-3), nz, 4)
+        #self.conv2 = nn.Conv2d(ngf * 2**(n-3), nz, 4)
+
+        #self.encoder = nn.Sequential()
+        ## input is (nc) x 64 x 64
+        #self.encoder.add_module('input-conv',nn.Conv2d(nc, ngf, 4, 2, 1, bias=False))
+        #self.encoder.add_module('input-relu',nn.LeakyReLU(0.2, inplace=True))
+        #for i in range(n-3):
+        #    # state size. (ngf) x 32 x 32
+        #    self.encoder.add_module('pyramid.{0}-{1}.conv'.format(ngf*2**i, ngf * 2**(i+1)), nn.Conv2d(ngf*2**(i), ngf * 2**(i+1), 4, 2, 1, bias=False))
+        #    self.encoder.add_module('pyramid.{0}.batchnorm'.format(ngf * 2**(i+1)), nn.BatchNorm2d(ngf * 2**(i+1)))
+        #    self.encoder.add_module('pyramid.{0}.relu'.format(ngf * 2**(i+1)), nn.LeakyReLU(0.2, inplace=True))
 
         # state size. (ngf*8) x 4 x 4
 
     def forward(self,input):
         output = self.encoder(input)
-        return [self.conv1(output),self.conv2(output)]
+        return [self.fc21(output.view(output.size(0),-1)),self.fc22(output.view(output.size(0),-1))]
 
 
 class _netG(nn.Module):
@@ -160,6 +188,10 @@ class _netG(nn.Module):
         self.ngpu = ngpu
         self.encoder = _Encoder(imageSize)
         self.sampler = _Sampler()
+
+        n_gen_shared_blk = 1
+        n_gen_res_blk    = 3
+        n_gen_front_blk  = 3
 
         n = math.log(imageSize,2)
 
@@ -192,7 +224,7 @@ class _netG(nn.Module):
         else:
             output = self.encoder(input)
             output = self.sampler(output)
-            output = self.decoder(output)
+            output = self.decoder(output.view(-1,opt.nz,1,1))
         return output
 
     def make_cuda(self):
@@ -201,7 +233,7 @@ class _netG(nn.Module):
         self.decoder.cuda()
 
 netG = _netG(opt.imageSize,ngpu)
-netG.apply(weights_init)
+#netG.apply(weights_init)
 if opt.netG != '':
     netG.load_state_dict(torch.load(opt.netG))
 print(netG)
@@ -248,7 +280,7 @@ if opt.netD != '':
 print(netD)
 
 criterion = nn.BCELoss()
-MSECriterion = nn.MSELoss()
+MSECriterion = nn.L1Loss()  #nn.MSELoss()
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
@@ -316,8 +348,12 @@ for epoch in range(opt.niter):
 
         KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
         KLD = torch.sum(KLD_element).mul_(-0.5)
+        #KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        # Normalise by same number of elements as in reconstruction
+        #KLD /= opt.batchSize * opt.imageSize * opt.imageSize
 
         sampled = netG.sampler(encoded)
+        sampled=sampled.view(-1,opt.nz,1,1)
         rec = netG.decoder(sampled)
         rec_win = vis.image(rec.data[0].cpu()*0.5+0.5,win = rec_win)
 
@@ -352,6 +388,14 @@ for epoch in range(opt.niter):
             vutils.save_image(fake.data,
                     '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
                     normalize=True)
+            recon_batch = rec
+            data=input
+            n = min(data.size(0), 8)
+            comparison = torch.cat([data[:n],
+                                  recon_batch.view(opt.batchSize, 3, opt.imageSize, opt.imageSize)[:n]])
+            save_image(comparison.data.cpu(),
+                     opt.outf + '/reconstruction_' + str(epoch) + '.png', nrow=n)
+
 
 
     if epoch%opt.saveInt == 0 and epoch!=0:
