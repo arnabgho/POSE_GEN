@@ -64,6 +64,13 @@ if opt.dataset in ['imagenet', 'folder', 'lfw']:
                                    transforms.ToTensor(),
                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                ]))
+    dataset_test=dset.ImageFolder(root=opt.dataroot+'_val',
+                               transform=transforms.Compose([
+                                   transforms.Scale(opt.imageSize),
+                                   transforms.CenterCrop(opt.imageSize),
+                                   transforms.ToTensor(),
+                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                               ]))
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
                         transform=transforms.Compose([
@@ -85,7 +92,7 @@ elif opt.dataset == 'fake':
 assert dataset
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=int(opt.workers))
-test_loader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
+test_loader = torch.utils.data.DataLoader(dataset_test, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=int(opt.workers))
 
 ngpu = int(opt.ngpu)

@@ -13,12 +13,10 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import visdom
+from common_net import *
+import math
 vis = visdom.Visdom()
-vis.env = 'dcgan'
-
-
-
-
+vis.env = 'dcgan_unit_temp'
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw | fake')
 parser.add_argument('--dataroot', required=True, help='path to dataset')
@@ -101,7 +99,8 @@ nc = 3
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
-        m.weight.data.normal_(0.0, 0.02)
+        if 'weight' in m.__dict__.keys():
+            m.weight.data.normal_(0.0, 0.02)
     elif classname.find('BatchNorm') != -1:
         m.weight.data.normal_(1.0, 0.02)
         m.bias.data.fill_(0)
@@ -149,38 +148,83 @@ if opt.netG != '':
 print(netG)
 
 
+#class _netD(nn.Module):
+#    def __init__(self, ngpu):
+#        super(_netD, self).__init__()
+#        self.ngpu = ngpu
+#        self.main = nn.Sequential(
+#            # input is (nc) x 64 x 64
+#            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+#            nn.LeakyReLU(0.2, inplace=True),
+#            # state size. (ndf) x 32 x 32
+#            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+#            nn.BatchNorm2d(ndf * 2),
+#            nn.LeakyReLU(0.2, inplace=True),
+#            # state size. (ndf*2) x 16 x 16
+#            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+#            nn.BatchNorm2d(ndf * 4),
+#            nn.LeakyReLU(0.2, inplace=True),
+#            # state size. (ndf*4) x 8 x 8
+#            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+#            nn.BatchNorm2d(ndf * 8),
+#            nn.LeakyReLU(0.2, inplace=True),
+#            # state size. (ndf*8) x 4 x 4
+#            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+#            nn.Sigmoid()
+#        )
+#
+#    def forward(self, input):
+#        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+#            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+#        else:
+#            output = self.main(input)
+#
+#        return output.view(-1, 1).squeeze(1)
+
 class _netD(nn.Module):
     def __init__(self, ngpu):
         super(_netD, self).__init__()
         self.ngpu = ngpu
-        self.main = nn.Sequential(
-            # input is (nc) x 64 x 64
-            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf) x 32 x 32
-            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*2) x 16 x 16
-            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*4) x 8 x 8
-            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 8),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*8) x 4 x 4
-            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
-            nn.Sigmoid()
+        input_dim_a = 3
+        ch = 64
+        n_enc_front_blk  = 3
+        n_enc_latter_blk = 1  #2
+        n_enc_res_blk    = 3
+        n_enc_shared_blk = 1
+        encA=[]
+        encA += [LeakyReLUConv2d(input_dim_a, ch, kernel_size=7, stride=2, padding=1)]
+        tch=ch
+        for i in range(0,n_enc_front_blk):
+            encA += [ReLUINSConv2d(tch, tch * 2, kernel_size=3, stride=2, padding=1)]
+            tch *= 2
+        for i in range(0,n_enc_latter_blk):
+            encA += [ReLUINSConv2d(tch, tch , kernel_size=3, stride=2, padding=1)]  #[ReLUINSConv2d(tch, tch , kernel_size=3, stride=2, padding=1)]
+        encA += [nn.Conv2d(tch, tch , 3, 2, 1,bias=False)]
+        encA += [INSResBlock(tch, tch)]
+        encA += [INSResBlock(tch, tch)]
+        encA += [INSResBlock(tch, tch)]
+        encA+=[nn.Sigmoid()]
+        self.fch=tch
+        #for i in range(0, n_enc_res_blk):
+        #    encA += [INSResBlock(tch, tch)]
+
+        #for i in range(0, n_enc_shared_blk):
+        #    encA += [INSResBlock(tch, tch)]
+
+        self.linear=nn.Sequential(
+        nn.Conv2d(self.fch,1,1,1,0,bias=False),
+        nn.Sigmoid()
         )
+        #encA += [GaussianNoiseLayer()]
+        self.main=nn.Sequential(*encA)
 
     def forward(self, input):
-        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
-        else:
-            output = self.main(input)
-
-        return output.view(-1, 1).squeeze(1)
+        #if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+        #    output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+        #else:
+        output = self.main(input)      #self.main(input)
+        output = self.linear(output)               #output.view(-1, self.fch))
+        return  output.view(-1, 1).squeeze(1) # output
 
 
 netD = _netD(ngpu)
